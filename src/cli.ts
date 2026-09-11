@@ -5,14 +5,12 @@ import { logger } from './config/logger.js';
 import { getDatabase } from './db/database.js';
 import { opsService } from './services/opsService.js';
 import { CopilotEngine } from './services/copilotEngine.js';
+import { cleanCopilotResponse } from './utils/cleaner.js';
 
 function renderCliMarkdown(text: string): string {
   return text
-    // Render ### Headers in Cyan & Bold
-    .replace(/^###?\s+(.*)$/gm, '\x1b[1;\x1b[36m$1\x1b[0m')
-    // Render **bold text** in Bright White
-    .replace(/\*\*(.*?)\*\*/g, '\x1b[1;\x1b[37m$1\x1b[0m')
-    // Render bullet points in Yellow
+    .replace(/^#{1,3}\s+(.*)$/gm, '\x1b[1;36m$1\x1b[0m')
+    .replace(/\*\*(.*?)\*\*/g, '\x1b[1;37m$1\x1b[0m')
     .replace(/^•\s+(.*)$/gm, ' \x1b[33m•\x1b[0m $1');
 }
 
@@ -50,20 +48,16 @@ async function main(): Promise<void> {
 
       try {
         const result = await engine.chat(line, session.id, crypto.randomUUID());
+        const answer = cleanCopilotResponse(result.answer);
         opsService.appendMessage({
           id: crypto.randomUUID(),
           sessionId: session.id,
           role: 'assistant',
-          content: result.answer,
+          content: answer,
           toolInvocations: result.toolInvocations,
           createdAt: new Date().toISOString(),
         });
-        console.log(`\n${renderCliMarkdown(result.answer)}\n`);
-        if (result.toolInvocations.length > 0) {
-          console.log(
-            `tools: ${result.toolInvocations.map((item) => `${item.name} (${item.ok ? 'ok' : 'err'})`).join(', ')} | loops=${result.loopCount}${result.truncated ? ' | truncated' : ''}\n`,
-          );
-        }
+        console.log(`\n${renderCliMarkdown(answer)}\n`);
       } catch (error) {
         console.error('Copilot request failed:', error instanceof Error ? error.message : error);
       }

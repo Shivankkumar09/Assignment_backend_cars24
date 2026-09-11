@@ -1,28 +1,88 @@
 /**
- * Cleans and formats raw LLM output into a clean, human-readable response.
+ * Turns raw LLM output into a short, readable ops-desk reply.
+ * Handles JSON wrappers, code fences, escaped newlines, and noisy markdown.
  */
 export function cleanCopilotResponse(rawText: string): string {
-  if (!rawText) return '';
+  if (!rawText) {
+    return '';
+  }
 
-  return (
-    rawText
-      // 1. Unescape escaped characters (e.g. \n -> newline, \" -> ")
-      .replace(/\\n/g, '\n')
-      .replace(/\\"/g, '"')
+  let text = unwrapModelPayload(rawText.trim());
 
-      // 2. Fix multiple redundant blank lines (collapse 3+ newlines into 2)
-      .replace(/\n{3,}/g, '\n\n')
+  text = stripCodeFences(text);
+  text = unescapeCommonSequences(text);
+  text = text.replace(/\r\n/g, '\n');
+  text = text.replace(/[ \t]+$/gm, '');
+  text = text.replace(/\n{3,}/g, '\n\n');
+  text = text.replace(/([^\n])\n(#{1,3}\s+)/g, '$1\n\n$2');
+  text = text.replace(/^\s*[-*]\s+/gm, '• ');
+  text = text.replace(/^\s{2,}(• )/gm, '$1');
 
-      // 3. Clean up loose spaces at the end of lines
-      .replace(/[ \t]+$/gm, '')
+  return text.trim();
+}
 
-      // 4. Ensure headers have proper spacing above them
-      .replace(/([^\n])\n(###?\s+)/g, '$1\n\n$2')
+function unwrapModelPayload(raw: string): string {
+  const asQuotedString = tryParseJsonString(raw);
+  if (asQuotedString !== null) {
+    return asQuotedString;
+  }
 
-      // 5. Clean up list bullet point spacing
-      .replace(/^\s*[\*\-]\s+/gm, '• ')
+  const asObject = tryParseJsonObject(raw);
+  if (asObject) {
+    const nested =
+      pickStringField(asObject, ['answer', 'text', 'message', 'content', 'reply']) ??
+      JSON.stringify(asObject, null, 2);
+    return nested;
+  }
 
-      // 6. Final trim
-      .trim()
-  );
+  return raw;
+}
+
+function tryParseJsonString(raw: string): string | null {
+  if (!(raw.startsWith('"') && raw.endsWith('"'))) {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === 'string' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function tryParseJsonObject(raw: string): Record<string, unknown> | null {
+  if (!(raw.startsWith('{') && raw.endsWith('}'))) {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function pickStringField(obj: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = obj[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function stripCodeFences(text: string): string {
+  const fenced = text.match(/^```(?:json|markdown|md|text)?\s*\n?([\s\S]*?)\n?```$/i);
+  if (fenced?.[1]) {
+    return fenced[1].trim();
+  }
+  return text.replace(/```(?:json|markdown|md|text)?\s*/gi, '').replace(/```/g, '');
+}
+
+function unescapeCommonSequences(text: string): string {
+  return text.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"');
 }

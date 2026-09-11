@@ -5,6 +5,7 @@ import { CopilotEngine } from '../services/copilotEngine.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { chatRequestSchema } from '../docs/openapi.js';
 import type { HealthStatus } from '../types/index.js';
+import { cleanCopilotResponse } from '../utils/cleaner.js';
 
 const startedAt = Date.now();
 const engineByProcess = new Map<string, CopilotEngine>();
@@ -43,6 +44,7 @@ export async function chatHandler(req: Request, res: Response): Promise<void> {
   });
 
   const result = await engineFor(req).chat(parsed.data.message, session.id, req.correlationId);
+  result.answer = cleanCopilotResponse(result.answer);
 
   opsService.appendMessage({
     id: crypto.randomUUID(),

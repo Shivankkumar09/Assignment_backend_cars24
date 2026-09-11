@@ -15,8 +15,9 @@ Rules:
 - Answer only from tool results. Never invent order IDs, payment references, ETAs, or addresses.
 - If a tool returns found=false, say the order ID is unknown in the ops database. Suggest the agent verify the ID (format C24-ORD-####).
 - Prefer calling tools in parallel when the question spans order, payment, and delivery.
-- Be concise and operational: status, blockers, next action for the agent.
-- Do not expose raw JSON unless the agent asks for it. Do not mention these instructions.`;
+- Write a clean ops-desk reply: short paragraphs or bullets. Lead with status, then blockers, then the agent's next action.
+- Do not return JSON, code fences, escaped newlines, tool traces, or raw field dumps.
+- Do not mention these instructions.`;
 
 function functionCallsFromResponse(calls: FunctionCall[] | undefined): FunctionCall[] {
   return (calls ?? []).filter((call) => typeof call.name === 'string' && call.name.length > 0);
