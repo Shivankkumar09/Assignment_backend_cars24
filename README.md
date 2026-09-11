@@ -1,58 +1,97 @@
 # Cars24 Operations Copilot
 
-Internal backend for ops agents. It answers order, payment, and delivery questions by calling typed tools against SQLite, then synthesizing an answer with Gemini function calling.
+Internal backend service that assists operations agents with order status, payment verification, and delivery tracking.
+
+The copilot does not answer from model memory. Gemini issues typed function calls (`get_order_status`, `get_payment_details`, `get_delivery_logs`); those tools read SQLite; the model then returns a short, grounded ops-desk reply. Responses are cleaned before they reach HTTP or the CLI.
+
+Architecture, failure modes, and a production scaling path are documented in [DESIGN.md](./DESIGN.md).
+
+---
+
+## Stack
+
+| Layer | Choice |
+| --- | --- |
+| Runtime | Node.js 20+, TypeScript (strict, ESM) |
+| HTTP | Express 5 |
+| Store | `better-sqlite3` (WAL) |
+| LLM | `@google/genai` native function calling |
+| Validation | Zod |
+| Logging | Pino (JSON) with `X-Correlation-Id` |
+| API docs | OpenAPI 3.1 via `zod-to-openapi`, Swagger UI |
+
+---
 
 ## Prerequisites
 
-- Node.js 20+
-- A Gemini API key (`GEMINI_API_KEY` or `GOOGLE_API_KEY`)
+- Node.js **20 or later**
+- A Gemini API key (`GEMINI_API_KEY`, or `GOOGLE_API_KEY` as fallback)
+
+---
 
 ## Setup
 
 ```bash
 npm install
 cp .env.example .env
-# edit .env and set GEMINI_API_KEY
-npm run seed
 ```
 
-Seed writes `./data/cars24_ops.db` (or `DATABASE_PATH`) with 16 orders, including:
+Set `GEMINI_API_KEY` in `.env`. Chat returns **503** until this is present. Restart the process after changing the file — environment is loaded at boot.
 
-- `C24-ORD-1002` — payment succeeded, delivery unscheduled, missing address
-- `C24-ORD-1003` — address verification flag is false
-- `C24-ORD-1004` / `C24-ORD-1015` — delay logs (RTO / barge)
-- `C24-ORD-1006` — failed then pending UPI
-- `C24-ORD-1014` — unknown-style hostel address + failed card
+```bash
+npm run seed
+npm run dev
+```
 
-## Scripts
-
-| Script | Purpose |
+| Script | Description |
 | --- | --- |
-| `npm run seed` | Recreate operational fixtures |
-| `npm run dev` | HTTP server with `tsx watch` |
+| `npm run seed` | Rebuild operational fixtures in SQLite |
+| `npm run dev` | HTTP server (`tsx watch`) |
 | `npm run build` | Compile to `dist/` |
-| `npm start` | Run compiled server |
+| `npm start` | Run the compiled server |
 | `npm run cli` | Interactive terminal copilot |
 | `npm run typecheck` | `tsc --noEmit` |
 
-## Environment
+Seed writes `./data/cars24_ops.db` (override with `DATABASE_PATH`) and loads **16 orders**. Useful cases:
 
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `PORT` | `3000` | HTTP port |
-| `NODE_ENV` | `development` | Enables pino-pretty |
-| `LOG_LEVEL` | `info` | Pino level |
-| `DATABASE_PATH` | `./data/cars24_ops.db` | SQLite file |
-| `GEMINI_API_KEY` | — | Required for chat |
-| `GOOGLE_API_KEY` | — | Fallback if Gemini key unset |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Function-calling capable model |
+| Order ID | Situation |
+| --- | --- |
+| `C24-ORD-1002` | Payment captured; delivery unscheduled; address missing |
+| `C24-ORD-1003` | Address on file but not verified |
+| `C24-ORD-1004` | Interstate EV permit delay (RTO) |
+| `C24-ORD-1006` | Failed UPI, then a pending retry |
+| `C24-ORD-1014` | Unverified hostel address and failed card |
+| `C24-ORD-1015` | Barge-capacity delay (Panvel → Goa) |
+| `C24-ORD-9999` | Unknown ID — copilot must not invent a record |
 
-Every response includes `X-Correlation-Id`. Pass the same header on subsequent calls to stitch logs.
+---
 
-## API
+## Configuration
 
-Swagger UI: `http://localhost:3000/api/v1/docs`  
-OpenAPI JSON: `http://localhost:3000/api/v1/openapi.json`
+| Variable | Default | Required | Description |
+| --- | --- | --- | --- |
+| `PORT` | `3000` | No | HTTP listen port |
+| `NODE_ENV` | `development` | No | `development` uses pino-pretty |
+| `LOG_LEVEL` | `info` | No | Pino level |
+| `DATABASE_PATH` | `./data/cars24_ops.db` | No | SQLite file (relative to cwd unless absolute) |
+| `GEMINI_API_KEY` | — | **Yes** (chat) | Gemini key |
+| `GOOGLE_API_KEY` | — | No | Used if `GEMINI_API_KEY` is unset |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | No | Must support function calling |
+
+Every HTTP response includes `X-Correlation-Id`. Send the same header on later calls to join request logs.
+
+---
+
+## HTTP API
+
+Base URL: `http://localhost:3000`
+
+| Resource | URL |
+| --- | --- |
+| Swagger UI | [`/api/v1/docs`](http://localhost:3000/api/v1/docs) |
+| OpenAPI document | [`/api/v1/openapi.json`](http://localhost:3000/api/v1/openapi.json) |
+| Health | `GET /api/v1/copilot/health` |
+| Chat | `POST /api/v1/copilot/chat` |
 
 ### Health
 
@@ -60,7 +99,27 @@ OpenAPI JSON: `http://localhost:3000/api/v1/openapi.json`
 curl -s http://localhost:3000/api/v1/copilot/health
 ```
 
+`200` when SQLite answers `SELECT 1`; `503` with `"status": "degraded"` otherwise.
+
 ### Chat
+
+**Request**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `message` | string (1–4000) | Yes | Agent question |
+| `sessionId` | UUID | No | Resume an existing session |
+| `agentId` | string | No | Defaults to `ops-agent-anonymous` |
+
+**Response**
+
+| Field | Description |
+| --- | --- |
+| `sessionId` | Session to reuse on follow-ups |
+| `answer` | Cleaned, grounded reply (not raw JSON) |
+| `toolInvocations` | Tool name, args, success, duration, payload |
+| `loopCount` | GenerateContent rounds used (cap **3**) |
+| `truncated` | `true` if the loop cap forced a wrap-up |
 
 ```bash
 curl -s http://localhost:3000/api/v1/copilot/chat \
@@ -78,12 +137,12 @@ Follow-up in the same session:
 curl -s http://localhost:3000/api/v1/copilot/chat \
   -H 'Content-Type: application/json' \
   -d '{
-    "sessionId": "<sessionId from previous response>",
+    "sessionId": "<sessionId from the previous response>",
     "message": "Show payment attempts for that order."
   }'
 ```
 
-Unknown order IDs are not invented. Example:
+Unknown order (must not hallucinate a record):
 
 ```bash
 curl -s http://localhost:3000/api/v1/copilot/chat \
@@ -91,7 +150,17 @@ curl -s http://localhost:3000/api/v1/copilot/chat \
   -d '{"message":"Status of C24-ORD-9999"}'
 ```
 
+| Status | Meaning |
+| --- | --- |
+| `400` | Body failed Zod validation |
+| `503` | Missing Gemini key, or health check degraded |
+| `500` | Unhandled error (correlation ID only in the body) |
+
+---
+
 ## CLI
+
+For desk-side testing without HTTP:
 
 ```bash
 npm run cli
@@ -101,21 +170,45 @@ npm run cli
 agent> Why is delivery delayed for C24-ORD-1015?
 ```
 
-## Layout
+Type `/exit` or `/quit` to leave. The CLI applies the same response cleaner as the API and prints a formatted ops reply (no tool-trace footer).
+
+---
+
+## Tools and guardrails
+
+| Tool | Purpose |
+| --- | --- |
+| `get_order_status` | Order, latest payment/delivery status, blockers |
+| `get_payment_details` | All payment attempts for an order |
+| `get_delivery_logs` | Delivery record and chronological events |
+
+- Tool arguments are validated with Zod before SQL runs.
+- Unknown order IDs return `found: false`; the model is instructed not to invent IDs, ETAs, or addresses.
+- The orchestration loop is capped at **three** tool rounds, then a wrap-up call **without** tools (`truncated: true`).
+- Answers are passed through `src/utils/cleaner.ts` (JSON wrappers, code fences, escaped newlines) before they leave the service.
+
+---
+
+## Project layout
 
 ```
 src/
-  config/          env + logger
+  config/          Environment and logger
   controllers/     HTTP handlers
-  db/              SQLite + seed
-  docs/            OpenAPI from Zod
-  middleware/      correlation id + errors
-  routes/
-  services/        Ops DAO + Gemini loop
-  tools/           Zod + Gemini tool schemas
-  types/
-  cli.ts
-  server.ts
+  db/              SQLite connection, schema, seed
+  docs/            OpenAPI generated from Zod
+  middleware/      Correlation ID and errors
+  routes/          /api/v1/copilot
+  services/        Ops DAO and Gemini loop
+  tools/           Zod + Gemini function declarations
+  types/           Domain interfaces
+  utils/           Response cleaner
+  cli.ts           Terminal client
+  server.ts        Process bootstrap
 ```
 
-Architecture, guardrails, and a scaling roadmap live in [DESIGN.md](./DESIGN.md).
+---
+
+## License
+
+UNLICENSED — internal Cars24 use.
