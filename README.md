@@ -209,6 +209,4 @@ src/
 
 ---
 
-## License
 
-UNLICENSED — internal Cars24 use.
